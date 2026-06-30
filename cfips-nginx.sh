@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
+trap 'echo -e "\n[FAIL] Unexpected error on line $LINENO — please report this." >&2' ERR
 
 # cf-nginx-realip — Cloudflare real IP restoration for nginx
 # Auto-detects your nginx setup and installs everything needed.
@@ -79,44 +80,30 @@ SCRIPT_PATH="$(realpath "$0")"
 # ─── Find ALL nginx binaries on this system ───────────────────────────────────
 # Prints one binary path per line, deduped, running process first.
 find_all_nginx_bins() {
-  # Use a temp file for dedup — avoids array/set -u issues entirely
-  local seen
-  seen=$(mktemp)
-  trap "rm -f ${seen}" RETURN
+  local seen_file
+  seen_file=$(mktemp /tmp/cf-nginx-seen.XXXXXX)
 
-  _emit() {
-    local bin="$1"
-    [[ -x "$bin" ]] || return 0
-    grep -qxF "$bin" "$seen" 2>/dev/null && return 0
-    echo "$bin" >> "$seen"
-    echo "$bin"
-  }
+  # Emit a binary only if it's executable and not already listed
+  local bin
+  for bin in \
+    "$(ps aux 2>/dev/null | awk '/nginx: master process/{for(i=11;i<=NF;i++){b=$i; gsub(/:/,"",b); if(b~/^\/.*nginx$/) {print b; exit}}}' || true)" \
+    /usr/local/nginx/sbin/nginx \
+    /usr/local/openresty/nginx/sbin/nginx \
+    /usr/local/sbin/nginx \
+    /opt/nginx/sbin/nginx \
+    /usr/sbin/nginx \
+    /sbin/nginx \
+    "$(command -v nginx 2>/dev/null || true)"
+  do
+    if [[ -n "$bin" && -x "$bin" ]]; then
+      if ! grep -qxF "$bin" "$seen_file" 2>/dev/null; then
+        echo "$bin" >> "$seen_file"
+        echo "$bin"
+      fi
+    fi
+  done
 
-  # 1. Running master process — strip colon suffix nginx appends to argv[0]
-  local running
-  running=$(ps aux 2>/dev/null \
-    | awk '/nginx: master process/{
-        for(i=11;i<=NF;i++){
-          gsub(/:/,"",$i)
-          if($i ~ /^\/.*nginx$/) { print $i; exit }
-        }
-      }' | head -1)
-  _emit "$running" 2>/dev/null || true
-
-  # 2. Known paths — custom installs before distro packages
-  _emit /usr/local/nginx/sbin/nginx
-  _emit /usr/local/openresty/nginx/sbin/nginx
-  _emit /usr/local/sbin/nginx
-  _emit /opt/nginx/sbin/nginx
-  _emit /usr/sbin/nginx
-  _emit /sbin/nginx
-
-  # 3. Whatever 'nginx' resolves to in PATH
-  local path_nginx
-  path_nginx=$(command -v nginx 2>/dev/null || true)
-  [[ -n "$path_nginx" ]] && _emit "$path_nginx"
-
-  return 0
+  rm -f "$seen_file"
 }
 
 # ─── Auto-detect the nginx binary (returns best single candidate) ─────────────
@@ -300,7 +287,9 @@ run_install() {
   # Collect all nginx binaries found on this system
   local all_nginx=()
   while IFS= read -r line; do
-    [[ -n "$line" ]] && all_nginx+=("$line")
+    if [[ -n "$line" ]]; then
+      all_nginx+=("$line")
+    fi
   done < <(find_all_nginx_bins)
 
   local nginx_bin=""
