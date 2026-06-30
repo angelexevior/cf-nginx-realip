@@ -77,47 +77,49 @@ done
 SCRIPT_PATH="$(realpath "$0")"
 
 # ─── Find ALL nginx binaries on this system ───────────────────────────────────
+# Prints one binary path per line, deduped, running process first.
 find_all_nginx_bins() {
-  local found=()
+  # Use a temp file for dedup — avoids array/set -u issues entirely
+  local seen
+  seen=$(mktemp)
+  trap "rm -f ${seen}" RETURN
 
-  # 1. The actually-running master process (most reliable)
+  _emit() {
+    local bin="$1"
+    [[ -x "$bin" ]] || return 0
+    grep -qxF "$bin" "$seen" 2>/dev/null && return 0
+    echo "$bin" >> "$seen"
+    echo "$bin"
+  }
+
+  # 1. Running master process — strip colon suffix nginx appends to argv[0]
   local running
   running=$(ps aux 2>/dev/null \
-    | awk '/nginx: master process/ && !/awk/{
-        for(i=1;i<=NF;i++) if($i ~ /^\/.*nginx/) { gsub(/:$/,"",$i); print $i; exit }
-      }')
-  [[ -n "$running" && -x "$running" ]] && found+=("$running")
+    | awk '/nginx: master process/{
+        for(i=11;i<=NF;i++){
+          gsub(/:/,"",$i)
+          if($i ~ /^\/.*nginx$/) { print $i; exit }
+        }
+      }' | head -1)
+  _emit "$running" 2>/dev/null || true
 
-  # 2. Known install paths
-  local candidates=(
-    /usr/local/nginx/sbin/nginx
-    /usr/local/openresty/nginx/sbin/nginx
-    /usr/local/sbin/nginx
-    /opt/nginx/sbin/nginx
-    /usr/sbin/nginx
-    /sbin/nginx
-  )
-  for bin in "${candidates[@]}"; do
-    [[ -x "$bin" ]] || continue
-    # Skip if already in list
-    local dup=false
-    for f in "${found[@]:-}"; do [[ "$f" == "$bin" ]] && dup=true && break; done
-    $dup || found+=("$bin")
-  done
+  # 2. Known paths — custom installs before distro packages
+  _emit /usr/local/nginx/sbin/nginx
+  _emit /usr/local/openresty/nginx/sbin/nginx
+  _emit /usr/local/sbin/nginx
+  _emit /opt/nginx/sbin/nginx
+  _emit /usr/sbin/nginx
+  _emit /sbin/nginx
 
-  # 3. Anything in PATH called nginx not already listed
+  # 3. Whatever 'nginx' resolves to in PATH
   local path_nginx
   path_nginx=$(command -v nginx 2>/dev/null || true)
-  if [[ -n "$path_nginx" && -x "$path_nginx" ]]; then
-    local dup=false
-    for f in "${found[@]:-}"; do [[ "$f" == "$path_nginx" ]] && dup=true && break; done
-    $dup || found+=("$path_nginx")
-  fi
+  [[ -n "$path_nginx" ]] && _emit "$path_nginx"
 
-  printf '%s\n' "${found[@]:-}"
+  return 0
 }
 
-# ─── Auto-detect the nginx binary (returns first/best candidate only) ─────────
+# ─── Auto-detect the nginx binary (returns best single candidate) ─────────────
 detect_nginx_bin() {
   find_all_nginx_bins | head -1
 }
@@ -319,19 +321,23 @@ run_install() {
     # Multiple installs — show menu and let user pick
     log_warn "Multiple nginx installations found:"
     echo ""
-    local i
-    for (( i=0; i<${#all_nginx[@]}; i++ )); do
+    local i=0
+    while [[ $i -lt ${#all_nginx[@]} ]]; do
       local ver
-      ver=$("${all_nginx[$i]}" -v 2>&1)
+      ver=$("${all_nginx[$i]}" -v 2>&1) || ver="unknown"
       echo -e "  ${BOLD}[$((i+1))]${RESET} ${all_nginx[$i]}  ${CYAN}(${ver})${RESET}"
+      i=$(( i + 1 ))
     done
     echo ""
     ask "Which nginx serves your sites? Enter number" "1"
-    local idx=$(( ${REPLY:-1} - 1 ))
-    [[ $idx -ge 0 && $idx -lt ${#all_nginx[@]} ]] || die "Invalid selection: ${REPLY}"
+    local num=${REPLY:-1}
+    local idx=$(( num - 1 ))
+    if [[ $idx -lt 0 || $idx -ge ${#all_nginx[@]} ]]; then
+      die "Invalid selection: ${num}"
+    fi
     nginx_bin="${all_nginx[$idx]}"
     local nginx_ver
-    nginx_ver=$("$nginx_bin" -v 2>&1)
+    nginx_ver=$("$nginx_bin" -v 2>&1) || nginx_ver="unknown"
     log_ok "Selected: ${nginx_bin}  (${nginx_ver})"
   fi
 
