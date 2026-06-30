@@ -1,7 +1,9 @@
-name: Create Release
+name: Create v2.0 Release
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - master
 
 jobs:
   release:
@@ -12,14 +14,24 @@ jobs:
       - name: Create v2.0 Release
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const releases = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const exists = releases.data.find(r => r.tag_name === 'cf-real-ip-nginx-V2.0');
+            if (exists) {
+              console.log('Release already exists, skipping.');
+              return;
+            }
             await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: 'cf-real-ip-nginx-V2.0',
               name: 'v2.0',
               target_commitish: 'master',
-              body: `## 🚀 What\'s New in v2.0 — Full Auto Installer
+              body: `## 🚀 What's New in v2.0 — Full Auto Installer
 
 > One command. No manual config editing. No guessing paths.
 
@@ -80,3 +92,4 @@ The installer automatically removes \`cfips.txt\`, writes \`cfips.conf\`, update
               draft: false,
               prerelease: false
             });
+            console.log('Release v2.0 created successfully.');
