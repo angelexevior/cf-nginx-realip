@@ -114,19 +114,39 @@ detect_nginx_bin() {
 # ─── Derive config directory from the nginx binary ───────────────────────────
 detect_nginx_conf_dir() {
   local nginx_bin="$1"
+  local conf_path=""
 
-  # nginx -V prints --conf-path= which is definitive
-  local conf_path
-  conf_path=$("$nginx_bin" -V 2>&1 | grep -oP '(?<=--conf-path=)\S+')
+  # Method 1: nginx -V prints --conf-path= at compile time
+  conf_path=$("$nginx_bin" -V 2>&1 | grep -oP '(?<=--conf-path=)\S+' || true)
   if [[ -n "$conf_path" && -f "$conf_path" ]]; then
     dirname "$conf_path"; return 0
   fi
 
-  # nginx -t also prints the config file being tested
-  conf_path=$("$nginx_bin" -t 2>&1 | awk '/configuration file/{print $NF}' | tr -d '.')
+  # Method 2: nginx -t prints the config file path in its output
+  local nginx_t_out
+  nginx_t_out=$("$nginx_bin" -t 2>&1 || true)
+  conf_path=$(echo "$nginx_t_out" | awk '/configuration file/{print $NF}' | tr -d '.')
   if [[ -n "$conf_path" && -f "$conf_path" ]]; then
     dirname "$conf_path"; return 0
   fi
+
+  # Method 3: infer from binary location — works for source-compiled nginx
+  # e.g. /usr/local/nginx/sbin/nginx  →  /usr/local/nginx/conf
+  local bin_dir
+  bin_dir=$(dirname "$nginx_bin")
+  local guessed="${bin_dir}/../conf"
+  guessed=$(realpath "$guessed" 2>/dev/null || true)
+  if [[ -n "$guessed" && -d "$guessed" && -f "$guessed/nginx.conf" ]]; then
+    echo "$guessed"; return 0
+  fi
+
+  # Method 4: common paths as last resort
+  local common
+  for common in /usr/local/nginx/conf /etc/nginx /usr/local/openresty/nginx/conf /opt/nginx/conf; do
+    if [[ -d "$common" && -f "$common/nginx.conf" ]]; then
+      echo "$common"; return 0
+    fi
+  done
 
   return 1
 }
