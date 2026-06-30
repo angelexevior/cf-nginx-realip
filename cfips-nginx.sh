@@ -76,34 +76,64 @@ done
 
 SCRIPT_PATH="$(realpath "$0")"
 
-# ─── Auto-detect the nginx binary that is actually running ────────────────────
-detect_nginx_bin() {
-  # Check the live master process first — most reliable
-  local running_bin
-  running_bin=$(ps aux 2>/dev/null \
-    | awk '/nginx: master process/{
-        for(i=11;i<=NF;i++) if($i ~ /^\//) { print $i; exit }
-      }' \
-    | head -1)
-  if [[ -n "$running_bin" && -x "$running_bin" ]]; then
-    echo "$running_bin"; return 0
-  fi
+# ─── Find ALL nginx binaries on this system ───────────────────────────────────
+find_all_nginx_bins() {
+  local found=()
 
-  # Fall back to known paths — custom installs before distro packages
+  # 1. The actually-running master process (most reliable)
+  local running
+  running=$(ps aux 2>/dev/null \
+    | awk '/nginx: master process/ && !/awk/{
+        for(i=1;i<=NF;i++) if($i ~ /^\/.*nginx/) { gsub(/:$/,"",$i); print $i; exit }
+      }')
+  [[ -n "$running" && -x "$running" ]] && found+=("$running")
+
+  # 2. Known install paths
   local candidates=(
     /usr/local/nginx/sbin/nginx
     /usr/local/openresty/nginx/sbin/nginx
     /usr/local/sbin/nginx
     /opt/nginx/sbin/nginx
     /usr/sbin/nginx
+    /sbin/nginx
   )
   for bin in "${candidates[@]}"; do
-    [[ -x "$bin" ]] && { echo "$bin"; return 0; }
+    [[ -x "$bin" ]] || continue
+    # Skip if already in list
+    local dup=false
+    for f in "${found[@]:-}"; do [[ "$f" == "$bin" ]] && dup=true && break; done
+    $dup || found+=("$bin")
   done
 
-  # Last resort: whatever is in PATH
-  command -v nginx &>/dev/null && { echo "nginx"; return 0; }
-  return 1
+  # 3. Anything in PATH called nginx not already listed
+  local path_nginx
+  path_nginx=$(command -v nginx 2>/dev/null || true)
+  if [[ -n "$path_nginx" && -x "$path_nginx" ]]; then
+    local dup=false
+    for f in "${found[@]:-}"; do [[ "$f" == "$path_nginx" ]] && dup=true && break; done
+    $dup || found+=("$path_nginx")
+  fi
+
+  printf '%s\n' "${found[@]:-}"
+}
+
+# ─── Auto-detect the nginx binary that is actually running ────────────────────
+detect_nginx_bin() {
+  local all_bins=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && all_bins+=("$line")
+  done < <(find_all_nginx_bins)
+
+  case "${#all_bins[@]}" in
+    0) return 1 ;;
+    1) echo "${all_bins[0]}"; return 0 ;;
+    *)
+      # Multiple nginx installs found — let the user choose
+      echo "__MULTIPLE__"
+      printf '%s\n' "${all_bins[@]}"
+      return 0
+      ;;
+  esac
 }
 
 # ─── Derive config directory from the nginx binary ───────────────────────────
@@ -280,17 +310,44 @@ run_install() {
   log_step "Step 1/5 — Locating nginx"
 
   local nginx_bin=""
-  if nginx_bin=$(detect_nginx_bin); then
-    local nginx_ver
-    nginx_ver=$("$nginx_bin" -v 2>&1)
-    log_ok "Detected: ${nginx_bin}"
-    log_info "Version:  ${nginx_ver}"
-  else
-    log_warn "Could not find a running nginx process or binary automatically."
+  local detect_result
+  detect_result=$(detect_nginx_bin)
+
+  if [[ -z "$detect_result" ]]; then
+    log_warn "Could not find any nginx binary on this system."
     ask "Enter the full path to your nginx binary" ""
     nginx_bin="$REPLY"
     [[ -x "$nginx_bin" ]] || die "Not executable: ${nginx_bin}"
+
+  elif [[ "$detect_result" == __MULTIPLE__* ]]; then
+    # Multiple installs found — build list and ask user to choose
+    local multi_bins=()
+    while IFS= read -r line; do
+      [[ -n "$line" && "$line" != "__MULTIPLE__" ]] && multi_bins+=("$line")
+    done <<< "$detect_result"
+
+    log_warn "Multiple nginx installations found:"
+    echo ""
+    local i=1
+    for bin in "${multi_bins[@]}"; do
+      local ver
+      ver=$("$bin" -v 2>&1)
+      echo -e "  ${BOLD}[$i]${RESET} ${bin}  ${CYAN}(${ver})${RESET}"
+      (( i++ ))
+    done
+    echo ""
+    ask "Which nginx serves your sites? Enter number" "1"
+    local choice=$(( REPLY - 1 ))
+    nginx_bin="${multi_bins[$choice]}"
+    [[ -x "$nginx_bin" ]] || die "Invalid selection"
+
+  else
+    nginx_bin="$detect_result"
   fi
+
+  local nginx_ver
+  nginx_ver=$("$nginx_bin" -v 2>&1)
+  log_ok "Using: ${nginx_bin}  (${nginx_ver})"
 
   # ── Step 2: Locate config directory ──────────────────────────────────────
   log_step "Step 2/5 — Locating nginx config directory"
