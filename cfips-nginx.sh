@@ -84,16 +84,25 @@ SCRIPT_PATH="$(realpath "$0")"
 
 # ─── Auto-detect nginx binary ─────────────────────────────────────────────────
 detect_nginx_bin() {
+  # Priority 1: check what's actually running right now
+  local running_bin
+  running_bin=$(ps aux 2>/dev/null | awk '/nginx: master/{print $11}' | grep -v grep | head -1)
+  if [[ -n "$running_bin" && -x "$running_bin" ]]; then
+    echo "$running_bin"
+    return 0
+  fi
+
+  # Priority 2: check common paths (prefer non-distro installs first)
   local candidates=(
-    nginx
-    /usr/sbin/nginx
     /usr/local/nginx/sbin/nginx
-    /usr/local/sbin/nginx
     /usr/local/openresty/nginx/sbin/nginx
+    /usr/local/sbin/nginx
     /opt/nginx/sbin/nginx
+    /usr/sbin/nginx
+    nginx
   )
   for bin in "${candidates[@]}"; do
-    if command -v "$bin" >/dev/null 2>&1 || [[ -x "$bin" ]]; then
+    if [[ -x "$bin" ]] || command -v "$bin" >/dev/null 2>&1; then
       echo "$bin"
       return 0
     fi
@@ -291,6 +300,13 @@ run_install() {
   if NGINX_BIN=$(detect_nginx_bin); then
     NGINX_VER=$("$NGINX_BIN" -v 2>&1 | head -1)
     log_ok "Found nginx: ${NGINX_BIN} (${NGINX_VER})"
+    echo ""
+    confirm "Is this the correct nginx instance serving your sites?" || {
+      ask "Enter the full path to your nginx binary" ""
+      NGINX_BIN="$REPLY"
+      [[ -x "$NGINX_BIN" ]] || die "Not executable: ${NGINX_BIN}"
+      log_ok "Using nginx: ${NGINX_BIN}"
+    }
   else
     log_warn "Could not find nginx binary automatically."
     ask "Enter the full path to your nginx binary" "/usr/sbin/nginx"
