@@ -117,23 +117,9 @@ find_all_nginx_bins() {
   printf '%s\n' "${found[@]:-}"
 }
 
-# ─── Auto-detect the nginx binary that is actually running ────────────────────
+# ─── Auto-detect the nginx binary (returns first/best candidate only) ─────────
 detect_nginx_bin() {
-  local all_bins=()
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && all_bins+=("$line")
-  done < <(find_all_nginx_bins)
-
-  case "${#all_bins[@]}" in
-    0) return 1 ;;
-    1) echo "${all_bins[0]}"; return 0 ;;
-    *)
-      # Multiple nginx installs found — let the user choose
-      echo "__MULTIPLE__"
-      printf '%s\n' "${all_bins[@]}"
-      return 0
-      ;;
-  esac
+  find_all_nginx_bins | head -1
 }
 
 # ─── Derive config directory from the nginx binary ───────────────────────────
@@ -309,45 +295,47 @@ run_install() {
   # ── Step 1: Locate nginx binary ───────────────────────────────────────────
   log_step "Step 1/5 — Locating nginx"
 
-  local nginx_bin=""
-  local detect_result
-  detect_result=$(detect_nginx_bin)
+  # Collect all nginx binaries found on this system
+  local all_nginx=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && all_nginx+=("$line")
+  done < <(find_all_nginx_bins)
 
-  if [[ -z "$detect_result" ]]; then
+  local nginx_bin=""
+
+  if [[ ${#all_nginx[@]} -eq 0 ]]; then
     log_warn "Could not find any nginx binary on this system."
     ask "Enter the full path to your nginx binary" ""
     nginx_bin="$REPLY"
     [[ -x "$nginx_bin" ]] || die "Not executable: ${nginx_bin}"
 
-  elif [[ "$detect_result" == __MULTIPLE__* ]]; then
-    # Multiple installs found — build list and ask user to choose
-    local multi_bins=()
-    while IFS= read -r line; do
-      [[ -n "$line" && "$line" != "__MULTIPLE__" ]] && multi_bins+=("$line")
-    done <<< "$detect_result"
+  elif [[ ${#all_nginx[@]} -eq 1 ]]; then
+    nginx_bin="${all_nginx[0]}"
+    local nginx_ver
+    nginx_ver=$("$nginx_bin" -v 2>&1)
+    log_ok "Detected: ${nginx_bin}  (${nginx_ver})"
 
+  else
+    # Multiple installs — show menu and let user pick
     log_warn "Multiple nginx installations found:"
     echo ""
-    local i=1
-    for bin in "${multi_bins[@]}"; do
+    local i
+    for (( i=0; i<${#all_nginx[@]}; i++ )); do
       local ver
-      ver=$("$bin" -v 2>&1)
-      echo -e "  ${BOLD}[$i]${RESET} ${bin}  ${CYAN}(${ver})${RESET}"
-      (( i++ ))
+      ver=$("${all_nginx[$i]}" -v 2>&1)
+      echo -e "  ${BOLD}[$((i+1))]${RESET} ${all_nginx[$i]}  ${CYAN}(${ver})${RESET}"
     done
     echo ""
     ask "Which nginx serves your sites? Enter number" "1"
-    local choice=$(( REPLY - 1 ))
-    nginx_bin="${multi_bins[$choice]}"
-    [[ -x "$nginx_bin" ]] || die "Invalid selection"
-
-  else
-    nginx_bin="$detect_result"
+    local idx=$(( ${REPLY:-1} - 1 ))
+    [[ $idx -ge 0 && $idx -lt ${#all_nginx[@]} ]] || die "Invalid selection: ${REPLY}"
+    nginx_bin="${all_nginx[$idx]}"
+    local nginx_ver
+    nginx_ver=$("$nginx_bin" -v 2>&1)
+    log_ok "Selected: ${nginx_bin}  (${nginx_ver})"
   fi
 
-  local nginx_ver
-  nginx_ver=$("$nginx_bin" -v 2>&1)
-  log_ok "Using: ${nginx_bin}  (${nginx_ver})"
+  [[ -x "$nginx_bin" ]] || die "nginx binary not executable: ${nginx_bin}"
 
   # ── Step 2: Locate config directory ──────────────────────────────────────
   log_step "Step 2/5 — Locating nginx config directory"
