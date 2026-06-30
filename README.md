@@ -2,106 +2,89 @@
 
 Automatically restores real visitor IPs in nginx access logs when your site is behind Cloudflare.
 
-When traffic flows through Cloudflare, nginx logs Cloudflare's proxy IP instead of the visitor's real IP. This script fetches Cloudflare's published IP ranges and writes an nginx include file that tells nginx to trust those ranges and read the real IP from the `CF-Connecting-IP` header.
+When traffic flows through Cloudflare, nginx logs Cloudflare's proxy IP instead of the visitor's real IP. This script auto-detects your nginx setup, fetches Cloudflare's published IP ranges (IPv4 + IPv6), writes a trusted-proxy include file, patches your `nginx.conf`, and sets up a weekly cron — all in one command.
 
 ## Quick Start
 
 ```bash
-# 1. Clone and make executable
 git clone https://github.com/angelexevior/cf-nginx-realip.git
 cd cf-nginx-realip
 chmod +x cfips-nginx.sh
-
-# 2. Run once to generate the include file
-#    (defaults to /etc/nginx — adjust with --path if different)
-sudo ./cfips-nginx.sh
-
-# 3. Add to your nginx.conf (inside the http block)
-#    include cfips.conf;
-
-# 4. Reload nginx
-sudo systemctl reload nginx
+sudo ./cfips-nginx.sh --install
 ```
+
+That's it. The installer handles everything automatically.
+
+## What `--install` does
+
+1. **Finds your nginx binary** — checks common paths; asks if it can't find it
+2. **Finds your nginx config directory** — reads it directly from nginx; asks if ambiguous
+3. **Fetches Cloudflare IP ranges** — IPv4 and IPv6
+4. **Writes `cfips.conf`** — atomic write with nginx config validation and auto-rollback on failure
+5. **Patches `nginx.conf`** — adds `include cfips.conf;` to the `http {}` block automatically; asks you to do it manually if the structure is non-standard
+6. **Reloads nginx** — via systemctl or `nginx -s reload`, whichever works
+7. **Installs a weekly cron** — keeps Cloudflare IP ranges current automatically
 
 ## Options
 
 | Flag | Description | Default |
 |---|---|---|
-| `-p, --path PATH` | nginx config directory | `/etc/nginx` |
+| `--install` | Full guided installation | — |
+| `-p, --path PATH` | nginx config directory (skip auto-detect) | auto |
 | `-f, --file FILE` | output filename inside PATH | `cfips.conf` |
 | `-H, --header HEADER` | header containing real IP | `CF-Connecting-IP` |
 | `-e, --extra-cidr CIDR` | additional trusted CIDR (repeatable) | — |
-| `-r, --reload` | reload nginx after update | auto-detect |
+| `-r, --reload` | reload nginx after IP list update | auto |
 | `-n, --no-reload` | skip nginx reload | — |
-| `--dry-run` | print config without writing | — |
-| `--install-cron` | install weekly cron entry | — |
+| `--dry-run` | print config without writing anything | — |
+| `--install-cron` | install weekly cron entry (requires `--path`) | — |
 | `-h, --help` | show help | — |
 
-## Examples
+## Updating the IP list manually
+
+The cron job handles this automatically, but you can also run it on demand:
 
 ```bash
-# Custom nginx path (e.g. compiled from source)
-sudo ./cfips-nginx.sh --path /usr/local/nginx/conf
-
-# Also trust an internal load balancer
-sudo ./cfips-nginx.sh --extra-cidr 10.0.0.0/8
-
-# Preview what would be written without changing anything
-./cfips-nginx.sh --dry-run
-
-# Install as a weekly cron job
-sudo ./cfips-nginx.sh --install-cron
-
-# Use X-Forwarded-For instead of CF-Connecting-IP
-sudo ./cfips-nginx.sh --header X-Forwarded-For
+sudo ./cfips-nginx.sh --reload
 ```
 
-## Keeping IPs Current
+## Verify it's working
 
-Cloudflare occasionally updates their IP ranges. Install a cron job to auto-update:
+After installation, visit your site and check the access log:
 
 ```bash
-sudo ./cfips-nginx.sh --install-cron
+tail -f /var/log/nginx/access.log
 ```
 
-This creates `/etc/cron.d/cf-nginx-realip` with a weekly entry. The script is idempotent — it skips the nginx reload if the IP list hasn't changed.
+The first column should show real visitor IPs, not Cloudflare ranges (`104.x`, `172.x`, `162.x`, etc.). Compare against your own public IP:
 
-## nginx.conf Integration
-
-Add this inside your `http` block:
-
-```nginx
-http {
-    include cfips.conf;
-    ...
-}
+```bash
+curl -s ifconfig.me
 ```
 
-The generated file contains entries like:
+## Troubleshooting
 
-```nginx
-# Cloudflare IPv4
-set_real_ip_from 103.21.244.0/22;
-set_real_ip_from 103.22.200.0/22;
-...
+**Still seeing Cloudflare IPs after install?**
 
-# Cloudflare IPv6
-set_real_ip_from 2400:cb00::/32;
-...
+```bash
+# Confirm the include was loaded
+sudo nginx -T 2>/dev/null | grep "set_real_ip_from" | head -5
 
-real_ip_header CF-Connecting-IP;
-real_ip_recursive on;
+# If empty — the include wasn't loaded. Check nginx.conf for the include line:
+sudo grep -n "cfips" /etc/nginx/nginx.conf
+# or
+sudo grep -n "cfips" /usr/local/nginx/conf/nginx.conf
 ```
 
-## Common nginx Config Paths
+**Permission denied running the script?**
 
-| Distribution / Setup | Path |
-|---|---|
-| Ubuntu/Debian (apt) | `/etc/nginx` |
-| CentOS/RHEL (yum) | `/etc/nginx` |
-| Compiled from source | `/usr/local/nginx/conf` |
-| OpenResty | `/usr/local/openresty/nginx/conf` |
-| Docker (official image) | `/etc/nginx` |
+```bash
+chmod +x cfips-nginx.sh
+```
+
+**Using a control panel (cPanel, Plesk, CyberPanel, HestiaCP)?**
+
+Control panels often manage their own nginx config and overwrite `nginx.conf` on changes. You may need to add the include via the panel's template system instead. Run `--dry-run` to see what the config file contains, then add it through your panel's nginx template editor.
 
 ## License
 
