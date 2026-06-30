@@ -159,6 +159,36 @@ do_reload() {
   log_warn "Could not reload nginx automatically — run manually: ${nginx_bin} -s reload"
 }
 
+# ─── Remove old cf-realip includes from nginx.conf and delete old files ───────
+cleanup_old_install() {
+  local nginx_conf="$1" conf_dir="$2"
+
+  # Patterns that previous versions of this script may have left behind
+  local old_files=("cfips.txt" "cfips.conf" "cloudflare-ips.conf" "cf-ips.conf")
+  local found_old=false
+
+  for old_file in "${old_files[@]}"; do
+    local old_path="${conf_dir}/${old_file}"
+
+    # Remove include line from nginx.conf
+    if grep -qE "^\s*include\s+.*${old_file}" "$nginx_conf" 2>/dev/null; then
+      sed -i -E "/^\s*include\s+.*${old_file}\s*;/d" "$nginx_conf"
+      log_info "Removed old include '${old_file}' from ${nginx_conf}"
+      found_old=true
+    fi
+
+    # Delete the old file
+    if [[ -f "$old_path" && "$old_file" != "$OUTPUT_FILE" ]]; then
+      rm -f "$old_path"
+      log_info "Deleted old config file: ${old_path}"
+      found_old=true
+    fi
+  done
+
+  $found_old && log_ok "Old installation cleaned up"
+  return 0
+}
+
 # ─── Fetch Cloudflare IPs ─────────────────────────────────────────────────────
 fetch_cloudflare_ips() {
   log_info "Fetching Cloudflare IPv4 ranges..."
@@ -310,6 +340,9 @@ run_install() {
 
   # ── Step 4: Patch nginx.conf ─────────────────────────────────────────────
   log_step "Step 4/5 — Patching nginx.conf"
+
+  # Remove any leftovers from previous installs (cfips.txt, old cfips.conf, etc.)
+  cleanup_old_install "$nginx_conf" "$nginx_conf_dir"
 
   if include_exists "$nginx_conf" "$OUTPUT_FILE"; then
     log_ok "'include ${OUTPUT_FILE};' already present — nothing to change"
